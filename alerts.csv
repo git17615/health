@@ -1,0 +1,3 @@
+timestamp, client_id, client_ip, alert_reason
+1774761042, client2, 127.0.0.1, Client disconnected
+1774761181, client2, 127.0.0.1, Client disconnected
