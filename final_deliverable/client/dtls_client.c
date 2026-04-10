@@ -71,6 +71,7 @@ int main(int argc, char **argv) {
         ERR_print_errors_fp(stderr);
     }
     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    SSL_CTX_set_cipher_list(ctx, "HIGH:!aNULL:!MD5");
 
     // Load Client Certificates to enable optional mutual authentication
     if (SSL_CTX_use_certificate_file(ctx, "certs/client.crt", SSL_FILETYPE_PEM) <= 0) {
@@ -121,45 +122,67 @@ int main(int argc, char **argv) {
         SSL *ssl = SSL_new(ctx);
         BIO *bio = BIO_new_dgram(server_fd, BIO_CLOSE);
 
+
         // Notify BIO about connected state
         BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, &server_addr);
         SSL_set_bio(ssl, bio, bio);
+
+        struct timeval timeout;
+        timeout.tv_sec = 3;
+        timeout.tv_usec = 0;
+
+        BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_RECV_TIMEOUT, 0, &timeout);
 
         printf("Connecting to Server %s:%d (DTLS)...\n", server_ip, SERVER_PORT);
 
         // Handshake
         int ssl_connected = 0;
-        int handshake_failed = 0;
-        while (!ssl_connected) {
-            int ret = SSL_connect(ssl);
-            if (ret <= 0) {
-                int err = SSL_get_error(ssl, ret);
-                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                    // In a proper implementation, use select() with timeout here.
-                    continue;
-                } else {
-                    printf("SSL_connect failed.\n");
-                    ERR_print_errors_fp(stderr);
-                    handshake_failed = 1;
-                    break;
-                }
-            } else {
-                ssl_connected = 1;
-                printf("Connected with %s encryption\n", SSL_get_cipher(ssl));
-            }
-        }
+        
+        int retries = 0;
+        while (!ssl_connected && retries < 10) {
+    int ret = SSL_connect(ssl);
+    
 
-        if (handshake_failed) {
-            SSL_free(ssl);
-#ifdef _WIN32
-            closesocket(server_fd);
-            Sleep(5000);
-#else
-            close(server_fd);
-            sleep(5);
-#endif
-            continue;
+    if (ret <= 0) {
+        int err = SSL_get_error(ssl, ret);
+
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(server_fd, &fds);
+
+            struct timeval tv;
+            tv.tv_sec = 2;
+            tv.tv_usec = 0;
+
+            int ready = select(server_fd + 1, &fds, NULL, NULL, &tv);
+            if (ready <= 0) continue;
+        } else {
+            printf("SSL_connect failed.\n");
+            ERR_print_errors_fp(stderr);
+           
+            break;
+            
         }
+          retries++; 
+    } else {
+        ssl_connected = 1;
+        printf("Connected with %s encryption\n", SSL_get_cipher(ssl));
+    }
+}
+
+if (!ssl_connected) {
+    printf("Handshake timeout\n");
+
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+#ifdef _WIN32
+    closesocket(server_fd);
+#else
+    close(server_fd);
+#endif
+    continue;
+}
 
         while (1) {
             memset(&packet, 0, sizeof(packet));
@@ -171,14 +194,23 @@ int main(int argc, char **argv) {
             if (written <= 0) {
                 int err = SSL_get_error(ssl, written);
                 if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                    continue;  // Try again
+                    fd_set fds;
+                    FD_ZERO(&fds);
+                    FD_SET(server_fd, &fds);
+
+                    struct timeval tv;
+                    tv.tv_sec = 2;
+                    tv.tv_usec = 0;
+
+                    int ready = select(server_fd + 1, &fds, NULL, NULL, &tv);
+                    if (ready <= 0) continue;
                 } else {
                     printf("Connection lost. Failed to write to server.\n");
                     break; // Break inner loop to reconnect
                 }
             }
 
-            printf("Sent metrics: CPU=%.2f, RAM=%.2f\n", packet.cpu_usage, packet.ram_usage);
+            printf("Sent metrics: CPU=%.2f, RAM=%.2f, DISK = %.2f, NET = %.2f\n", packet.cpu_usage, packet.ram_usage, packet.disk_usage, packet.net_usage);
 
 #ifdef _WIN32
             Sleep(5000);
